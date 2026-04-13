@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "h6006ctl"
+version = "0.1.0"
+description = "Local BLE control for Govee H6006 bulbs"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+  "bleak>=1.1.1",
+]
+keywords = ["bluetooth", "ble", "govee", "h6006", "lighting", "smarthome"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Home Automation",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/devdotbo/h6006ctl"
+Issues = "https://github.com/devdotbo/h6006ctl/issues"
+Repository = "https://github.com/devdotbo/h6006ctl"
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14.4",
+]
+
+[project.scripts]
+h6006ctl = "h6006ctl.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+extend-exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/vendor",
+  "/.venv",
+  "/.ruff_cache",
+  "/dist",
+  "/tests/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/h6006ctl"]
