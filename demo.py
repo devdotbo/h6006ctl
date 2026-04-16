@@ -130,14 +130,18 @@ async def demo(duration: float, delay: float):
             f += 1
             await asyncio.sleep(delay)
 
-        # Restore: bright warm white
-        print("Restoring warm white...")
-        await w({b.address: brightness_packet(100) for b in bulbs})
-        await asyncio.sleep(0.15)
-        await w({b.address: color_temp_packet(2700) for b in bulbs})
+        suffix = f" ({dropped} dropped)" if dropped else ""
+        print(f"{f} frames | {f / duration:.1f} fps{suffix}")
 
-    suffix = f" ({dropped} dropped)" if dropped else ""
-    print(f"{f} frames | {f / duration:.1f} fps{suffix}")
+        # Restore: bright warm white - per-bulb so one failure doesn't block others
+        print("Restoring warm white...")
+        for b in bulbs:
+            try:
+                await w({b.address: brightness_packet(100)})
+                await asyncio.sleep(0.1)
+                await w({b.address: color_temp_packet(2700)})
+            except Exception:
+                print(f"  restore failed for {b.name} (connection lost)")
     return 0
 
 
