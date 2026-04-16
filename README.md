@@ -75,13 +75,34 @@ uv run h6006ctl status --json               # JSON output
 uv run h6006ctl status ABCD                 # one bulb
 ```
 
-### Demos
+### Demo
+
+`demo.py` cycles through 8 visual phases using [OKLCH](https://oklch.com/) perceptual color space, then restores bright warm white.
+
+```bash
+uv run python demo.py                       # 20s default
+uv run python demo.py -d 30                 # 30 seconds
+uv run python demo.py -d 10 -f 0.01         # 10s, fastest frames
+```
+
+Phases:
+
+1. **OKLCH rainbow sweep** - perceptually uniform hue rotation (all hues equally bright)
+2. **Spatial rainbow chase** - each bulb at equidistant hue offset
+3. **Saturated strobe** - OKLCH-selected primaries with balanced luminance
+4. **Gamma brightness pulse** - 2.2 gamma curve with hue drift
+5. **CT gradient sweep** - per-bulb warm/neutral/cool spread (2700-6500K)
+6. **Aesthetic random** - constrained OKLCH (always vibrant, never muddy)
+7. **Police flash** - OKLCH red/violet with brightness variation
+8. **Complementary wave** - true perceptual complements with spatial sweep
+
+The demo uses parallel `asyncio.gather` writes for maximum throughput and cycles BLE sessions every 12 seconds to work around the H6006's firmware connection timeout (see below).
+
+Built-in demos that restore a safe default baseline:
 
 ```bash
 uv run h6006ctl identify ABCD               # blink one bulb for labeling
 uv run h6006ctl funny                       # three-color light show
-uv run python demo.py                       # 20s full demo (all phases)
-uv run python demo.py -d 30 -f 0.03         # 30s, faster frames
 ```
 
 ### Targeting
@@ -105,6 +126,24 @@ Demo commands restore this baseline when they finish:
 
 Regular commands (`on`, `off`, `rgb`, `ct`, `brightness`, `set`) are persistent.
 
+## BLE Performance Notes
+
+### Throughput
+
+| Metric | Value |
+|--------|-------|
+| Max sustained fps (3 bulbs) | ~20 fps |
+| Writes per second (3 bulbs, parallel) | ~60 |
+| Color resolution per frame | 24-bit RGB (16.7M colors) |
+| Brightness steps | 101 (0-100) |
+| CT steps | 3,800 (2700-6500K) |
+
+### H6006 firmware connection timeout
+
+The H6006 firmware disconnects BLE connections after approximately 15 seconds regardless of traffic. This is an application-level timeout in the bulb firmware, not a BLE supervision timeout - write-without-response traffic and GATT reads do not prevent it. The `demo.py` works around this with session cycling (disconnect and reconnect every 12 seconds).
+
+Regular CLI commands (`on`, `off`, `set`, `status`, etc.) are unaffected because their sessions are short-lived.
+
 ## Flipper Zero
 
 A companion Flipper Zero application lives in `flipper/`. It has protocol-aligned packet builders verified against the Python CLI. See [`flipper/README.md`](flipper/README.md) for build instructions and current status.
@@ -113,7 +152,7 @@ A companion Flipper Zero application lives in `flipper/`. It has protocol-aligne
 
 All commands verified against real H6006 bulbs:
 
-`scan` `status` `on` `off` `brightness` `rgb` `ct` `set` `identify` `funny`
+`scan` `status` `on` `off` `brightness` `rgb` `ct` `set` `identify` `funny` `demo.py`
 
 One-bulb and all-bulb targeting both verified. Brightness scale is `0-100`.
 

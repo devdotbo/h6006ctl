@@ -42,6 +42,12 @@ Examples:
   - `AA 05 0D 00 00 00 0A 8C ...`
 - Power-off is reliable within the same BLE session, but a brand-new reconnect/query after power-off may read back as `on` on the tested hardware
 
+## BLE connection behavior
+
+- The write characteristic (`...2b11`) supports Write Without Response only. Write With Response (`response=True` in bleak) is rejected.
+- The H6006 firmware disconnects BLE connections after approximately 15 seconds. This is consistent across all tested write rates (10-43 fps) and is not affected by GATT reads or write-with-response attempts. The timeout appears to be an application-level timer in the bulb firmware, not a standard BLE supervision timeout.
+- Short-lived sessions (single commands, state queries) are unaffected. Long-running sessions (demos, continuous control) must cycle connections before the ~15s limit.
+
 ## Address cache
 
 The CLI caches discovered device addresses to skip BLE scanning on repeat invocations. Cache location:

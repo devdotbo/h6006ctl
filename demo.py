@@ -23,7 +23,6 @@ from h6006ctl.protocol import (
     WRITE_UUID,
     brightness_packet,
     color_temp_packet,
-    power_packet,
     rgb_packet,
 )
 
@@ -43,13 +42,13 @@ def _oklab_to_linear_rgb(L: float, a: float, b: float) -> tuple[float, float, fl
     l_ = L + 0.3963377774 * a + 0.2158037573 * b
     m_ = L - 0.1055613458 * a - 0.0638541728 * b
     s_ = L - 0.0894841775 * a - 1.2914855480 * b
-    l = l_ ** 3
+    l_cubed = l_ ** 3
     m = m_ ** 3
     s = s_ ** 3
     return (
-        +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+        +4.0767416621 * l_cubed - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l_cubed + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l_cubed - 0.7034186147 * m + 1.7076147010 * s,
     )
 
 def oklch(L: float, C: float, h_deg: float) -> tuple[int, int, int]:
@@ -75,8 +74,6 @@ async def run_session(bulbs, duration, delay, state):
     f = state["frame"]
     total_dur = state["total_duration"]
     t_global = state["t_global"]
-    n_bulbs = len(bulbs)
-
     async with BulbSession(bulbs) as session:
         alive = dict(session._clients)
 
@@ -89,7 +86,7 @@ async def run_session(bulbs, duration, delay, state):
                   for a, p in to_send.items()),
                 return_exceptions=True,
             )
-            for addr, result in zip(to_send, results):
+            for addr, result in zip(to_send, results, strict=True):
                 if isinstance(result, BaseException):
                     del alive[addr]
                     state["lost"] += 1
@@ -124,7 +121,8 @@ async def run_session(bulbs, duration, delay, state):
 
             elif phase == 2:
                 # Saturated strobe - OKLCH primaries (more vivid than sRGB primaries)
-                hues = [29, 142, 264, 70, 195, 330, 0]  # warm red, green, violet, yellow, cyan, magenta
+                # warm red, green, violet, yellow, cyan, magenta, white
+                hues = [29, 142, 264, 70, 195, 330, 0]
                 chroma = [0.2, 0.2, 0.2, 0.18, 0.15, 0.18, 0.0]
                 light = [0.65, 0.75, 0.55, 0.85, 0.8, 0.7, 1.0]
                 idx = f % len(hues)
@@ -198,7 +196,10 @@ async def demo(duration: float, delay: float):
         print("No bulbs found.", file=sys.stderr)
         return 1
 
-    print(f"{len(bulbs)} bulb(s) | {duration}s | {delay:.3f}s/frame | 8 phases | OKLCH color | reconnect every {SESSION_SECONDS:.0f}s")
+    print(
+        f"{len(bulbs)} bulb(s) | {duration}s | {delay:.3f}s/frame"
+        f" | 8 phases | OKLCH | reconnect {SESSION_SECONDS:.0f}s"
+    )
 
     state = {
         "frame": 0, "sent": 0, "lost": 0,
