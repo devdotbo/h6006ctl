@@ -13,7 +13,6 @@ A small Python CLI for discovering nearby H6006 bulbs and controlling them direc
 - **Full control** - power, brightness (0-100), RGB color, color temperature (2700-6500K)
 - **State readback** - query power, brightness, and color mode from the bulbs
 - **Demo modes** - `identify`, `funny`, and a standalone `demo.py` light show
-- **Flipper Zero FAP** - companion app in `flipper/` with protocol-aligned packet builders
 
 ## Quickstart
 
@@ -146,7 +145,7 @@ Regular CLI commands (`on`, `off`, `set`, `status`, etc.) are unaffected because
 
 ## Flipper Zero
 
-A companion Flipper Zero application lives in `flipper/`. It has protocol-aligned packet builders verified against the Python CLI. See [`flipper/README.md`](flipper/README.md) for build instructions and current status.
+A native Flipper Zero FAP lives in a separate firmware fork: [devdotbo/flipperzero-firmware, branch `feat/ble-central`](https://github.com/devdotbo/flipperzero-firmware/tree/feat/ble-central/applications_user/govee_h6006). The fork adds a BLE central-mode HAL (requires BLE Full stack on Core2) and ships the H6006 FAP using the same packet builders this repo validated.
 
 ## Verified Hardware Behavior
 
