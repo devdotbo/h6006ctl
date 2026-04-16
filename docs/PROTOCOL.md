@@ -42,6 +42,14 @@ Examples:
   - `AA 05 0D 00 00 00 0A 8C ...`
 - Power-off is reliable within the same BLE session, but a brand-new reconnect/query after power-off may read back as `on` on the tested hardware
 
+## Address cache
+
+The CLI caches discovered device addresses to skip BLE scanning on repeat invocations. Cache location:
+
+- `$XDG_CONFIG_HOME/h6006ctl/bulbs.json` (default `~/.config/h6006ctl/bulbs.json`)
+
+The cache stores only device addresses and advertising names. It is written atomically and validated on load. Use `h6006ctl scan --save` to populate and `--no-cache` to bypass.
+
 ## Attribution
 
 This standalone CLI was informed by prior public research, especially:

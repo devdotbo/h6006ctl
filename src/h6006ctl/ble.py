@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 
+from .cache import load_bulbs
 from .protocol import (
     BRIGHTNESS_CMD,
     COLOR_CMD,
@@ -70,10 +71,26 @@ class BulbSession:
         self._stack = AsyncExitStack()
         await self._stack.__aenter__()
         try:
-            for bulb in self.bulbs:
-                client = BleakClient(bulb.ble_device or bulb.address, timeout=self.timeout)
-                await self._stack.enter_async_context(client)
-                self._clients[bulb.address] = client
+            if len(self.bulbs) <= 1:
+                for bulb in self.bulbs:
+                    client = BleakClient(bulb.ble_device or bulb.address, timeout=self.timeout)
+                    await self._stack.enter_async_context(client)
+                    self._clients[bulb.address] = client
+            else:
+                clients = [
+                    BleakClient(bulb.ble_device or bulb.address, timeout=self.timeout)
+                    for bulb in self.bulbs
+                ]
+                results = await asyncio.gather(
+                    *(c.connect() for c in clients), return_exceptions=True
+                )
+                for client in clients:
+                    self._stack.push_async_callback(client.disconnect)
+                errors = [r for r in results if isinstance(r, BaseException)]
+                if errors:
+                    raise errors[0]
+                for bulb, client in zip(self.bulbs, clients, strict=True):
+                    self._clients[bulb.address] = client
         except Exception as exc:
             await self._stack.__aexit__(type(exc), exc, exc.__traceback__)
             raise
@@ -156,7 +173,7 @@ def parse_notification(frame: bytes | bytearray) -> tuple[str, object] | None:
     return None
 
 
-async def discover_bulbs(timeout: float = 10.0) -> list[Bulb]:
+async def discover_bulbs(timeout: float = 5.0) -> list[Bulb]:
     devices = await BleakScanner.discover(timeout=timeout, return_adv=True)
     bulbs: list[Bulb] = []
 
@@ -178,12 +195,36 @@ async def discover_bulbs(timeout: float = 10.0) -> list[Bulb]:
     return bulbs
 
 
-async def resolve_targets(targets: Sequence[str], timeout: float = 10.0) -> list[Bulb]:
+async def resolve_targets(
+    targets: Sequence[str], timeout: float = 5.0, *, use_cache: bool = True
+) -> list[Bulb]:
+    if use_cache:
+        cached = bulbs_from_cache()
+        if cached is not None:
+            if not targets:
+                return cached
+            resolved: list[Bulb] = []
+            lowered_targets = [t.lower() for t in targets]
+            for target in lowered_targets:
+                matches = _find_matches(target, cached)
+                if not matches:
+                    pass  # fall through to scan
+                elif len(matches) > 1:
+                    options = ", ".join(f"{b.name} ({b.address})" for b in matches)
+                    raise ValueError(f"Target '{target}' is ambiguous: {options}")
+                else:
+                    bulb = matches[0]
+                    if bulb.address not in {item.address for item in resolved}:
+                        resolved.append(bulb)
+            if len(resolved) == len(lowered_targets):
+                return resolved
+            # Fall through to scan if any target didn't match cache
+
     discovered = await discover_bulbs(timeout=timeout)
     if not targets:
         return discovered
 
-    resolved: list[Bulb] = []
+    resolved = []
     lowered_targets = [target.lower() for target in targets]
     for target in lowered_targets:
         matches = _find_matches(target, discovered)
@@ -212,6 +253,17 @@ def _find_matches(target: str, bulbs: Iterable[Bulb]) -> list[Bulb]:
     return matches
 
 
+def bulbs_from_cache() -> list[Bulb] | None:
+    """Convert cached dicts to Bulb objects. Returns None if cache is unusable."""
+    entries = load_bulbs()
+    if entries is None:
+        return None
+    return [
+        Bulb(address=entry["address"], name=entry["name"])
+        for entry in entries
+    ]
+
+
 async def set_power(bulbs: Sequence[Bulb], on: bool) -> None:
     async with BulbSession(bulbs) as session:
         await session.write_all({bulb.address: power_packet(on) for bulb in bulbs})
@@ -236,6 +288,43 @@ async def set_rgb(bulbs: Sequence[Bulb], red: int, green: int, blue: int) -> Non
 async def set_color_temp(bulbs: Sequence[Bulb], kelvin: int) -> None:
     async with BulbSession(bulbs) as session:
         await session.write_all({bulb.address: color_temp_packet(kelvin) for bulb in bulbs})
+
+
+async def set_multiple(
+    bulbs: Sequence[Bulb],
+    *,
+    power: bool | None = None,
+    brightness: int | None = None,
+    rgb: tuple[int, int, int] | None = None,
+    kelvin: int | None = None,
+) -> None:
+    """Apply multiple properties in a single BLE session.
+
+    Packet order: power -> brightness -> color (matches restore_default_state).
+    """
+    if not bulbs:
+        return
+
+    async with BulbSession(bulbs) as session:
+        if power is not None:
+            await session.write_all({b.address: power_packet(power) for b in bulbs})
+            if not power:
+                await asyncio.sleep(1.0)
+            else:
+                await asyncio.sleep(0.2)
+        if brightness is not None:
+            await session.write_all(
+                {b.address: brightness_packet(brightness) for b in bulbs}
+            )
+            await asyncio.sleep(0.2)
+        if rgb is not None:
+            await session.write_all(
+                {b.address: rgb_packet(*rgb) for b in bulbs}
+            )
+        elif kelvin is not None:
+            await session.write_all(
+                {b.address: color_temp_packet(kelvin) for b in bulbs}
+            )
 
 
 async def restore_default_state(bulbs: Sequence[Bulb]) -> None:

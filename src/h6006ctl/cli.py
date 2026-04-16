@@ -18,9 +18,11 @@ from .ble import (
     resolve_targets,
     set_brightness,
     set_color_temp,
+    set_multiple,
     set_power,
     set_rgb,
 )
+from .cache import save_bulbs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,51 +30,69 @@ def build_parser() -> argparse.ArgumentParser:
         prog="h6006ctl",
         description="Scan and control nearby Govee H6006 bulbs over Bluetooth LE.",
     )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Skip address cache, force BLE scan.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan = subparsers.add_parser("scan", help="Discover nearby H6006 bulbs.")
-    scan.add_argument("--timeout", type=float, default=10.0)
+    scan.add_argument("--timeout", type=float, default=5.0)
     scan.add_argument("--json", action="store_true", dest="as_json")
+    scan.add_argument(
+        "--save", action="store_true", dest="save_cache",
+        help="Save discovered bulbs to address cache.",
+    )
 
     status = subparsers.add_parser("status", help="Query bulb power, brightness, and color state.")
     status.add_argument("targets", nargs="*")
-    status.add_argument("--timeout", type=float, default=10.0)
+    status.add_argument("--timeout", type=float, default=5.0)
     status.add_argument("--json", action="store_true", dest="as_json")
 
     on = subparsers.add_parser("on", help="Turn bulbs on.")
     on.add_argument("targets", nargs="*")
-    on.add_argument("--timeout", type=float, default=10.0)
+    on.add_argument("--timeout", type=float, default=5.0)
 
     off = subparsers.add_parser("off", help="Turn bulbs off.")
     off.add_argument("targets", nargs="*")
-    off.add_argument("--timeout", type=float, default=10.0)
+    off.add_argument("--timeout", type=float, default=5.0)
 
     brightness = subparsers.add_parser("brightness", help="Set brightness 0-100.")
     brightness.add_argument("value", type=int)
     brightness.add_argument("targets", nargs="*")
-    brightness.add_argument("--timeout", type=float, default=10.0)
+    brightness.add_argument("--timeout", type=float, default=5.0)
 
     rgb = subparsers.add_parser("rgb", help="Set RGB color.")
     rgb.add_argument("red", type=int)
     rgb.add_argument("green", type=int)
     rgb.add_argument("blue", type=int)
     rgb.add_argument("targets", nargs="*")
-    rgb.add_argument("--timeout", type=float, default=10.0)
+    rgb.add_argument("--timeout", type=float, default=5.0)
 
     ct = subparsers.add_parser("ct", help="Set color temperature in Kelvin.")
     ct.add_argument("kelvin", type=int)
     ct.add_argument("targets", nargs="*")
-    ct.add_argument("--timeout", type=float, default=10.0)
+    ct.add_argument("--timeout", type=float, default=5.0)
 
     identify_parser = subparsers.add_parser("identify", help="Blink one bulb so you can label it.")
     identify_parser.add_argument("target")
-    identify_parser.add_argument("--timeout", type=float, default=10.0)
+    identify_parser.add_argument("--timeout", type=float, default=5.0)
     identify_parser.add_argument("--cycles", type=int, default=3)
 
     funny_parser = subparsers.add_parser("funny", help="Run a short three-color light show.")
     funny_parser.add_argument("targets", nargs="*")
-    funny_parser.add_argument("--timeout", type=float, default=10.0)
+    funny_parser.add_argument("--timeout", type=float, default=5.0)
     funny_parser.add_argument("--loops", type=int, default=3)
+
+    set_cmd = subparsers.add_parser("set", help="Set multiple properties in a single BLE session.")
+    set_cmd.add_argument("targets", nargs="*")
+    set_cmd.add_argument("--timeout", type=float, default=5.0)
+    power_group = set_cmd.add_mutually_exclusive_group()
+    power_group.add_argument("--on", action="store_true", default=None, dest="power_on")
+    power_group.add_argument("--off", action="store_true", default=None, dest="power_off")
+    set_cmd.add_argument("--brightness", type=int, default=None)
+    set_cmd.add_argument("--rgb", type=int, nargs=3, metavar=("R", "G", "B"), default=None)
+    set_cmd.add_argument("--ct", type=int, metavar="KELVIN", default=None)
 
     return parser
 
@@ -84,30 +104,44 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "scan":
             bulbs = await discover_bulbs(timeout=args.timeout)
+            if args.save_cache:
+                save_bulbs([{"address": b.address, "name": b.name} for b in bulbs])
             return _print_scan(bulbs, as_json=args.as_json)
 
         if args.command == "status":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             states = await get_status(bulbs)
             return _print_status(bulbs, states, as_json=args.as_json)
 
         if args.command == "on":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             await set_power(bulbs, on=True)
             print(_describe_targets("Turned on", bulbs))
             return 0
 
         if args.command == "off":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             await set_power(bulbs, on=False)
             print(_describe_targets("Turned off", bulbs))
             return 0
 
         if args.command == "brightness":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             _require_range("brightness", args.value, 0, 100)
             await set_brightness(bulbs, args.value)
@@ -115,7 +149,10 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "rgb":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             for name, value in (("red", args.red), ("green", args.green), ("blue", args.blue)):
                 _require_range(name, value, 0, 255)
@@ -129,7 +166,10 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "ct":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             _require_range("kelvin", args.kelvin, 2700, 6500)
             await set_color_temp(bulbs, args.kelvin)
@@ -137,17 +177,67 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "identify":
-            bulbs = await resolve_targets([args.target], timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                [args.target], timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             await identify(bulbs[0], cycles=args.cycles)
             print(f"Identified {bulbs[0].name} ({bulbs[0].address})")
             return 0
 
         if args.command == "funny":
-            bulbs = await resolve_targets(args.targets, timeout=args.timeout)
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
             _require_bulbs(bulbs)
             await funny(bulbs, loops=args.loops)
             print(_describe_targets("Ran the funny light show on", bulbs))
+            return 0
+
+        if args.command == "set":
+            if args.rgb is not None and args.ct is not None:
+                raise ValueError("Cannot use --rgb and --ct together.")
+            power = None
+            if args.power_on:
+                power = True
+            elif args.power_off:
+                power = False
+            brightness = args.brightness
+            rgb = tuple(args.rgb) if args.rgb is not None else None
+            kelvin = args.ct
+
+            if power is None and brightness is None and rgb is None and kelvin is None:
+                raise ValueError(
+                    "set requires at least one property"
+                    " (--on/--off, --brightness, --rgb, --ct)."
+                )
+
+            if brightness is not None:
+                _require_range("brightness", brightness, 0, 100)
+            if rgb is not None:
+                for name, val in zip(("red", "green", "blue"), rgb, strict=True):
+                    _require_range(name, val, 0, 255)
+            if kelvin is not None:
+                _require_range("kelvin", kelvin, 2700, 6500)
+
+            use_cache = not args.no_cache
+            bulbs = await resolve_targets(
+                args.targets, timeout=args.timeout, use_cache=use_cache,
+            )
+            _require_bulbs(bulbs)
+            await set_multiple(bulbs, power=power, brightness=brightness, rgb=rgb, kelvin=kelvin)
+            parts = []
+            if power is not None:
+                parts.append("on" if power else "off")
+            if brightness is not None:
+                parts.append(f"brightness={brightness}")
+            if rgb is not None:
+                parts.append(f"rgb={rgb}")
+            if kelvin is not None:
+                parts.append(f"ct={kelvin}")
+            print(_describe_targets(f"Set {', '.join(parts)} on", bulbs))
             return 0
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
