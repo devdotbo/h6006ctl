@@ -2,8 +2,8 @@
 """H6006 LED demo - every trick as fast as BLE allows.
 
 Cycles through 8 visual phases then restores bright warm white.
-Uses parallel writes, per-bulb health tracking, and periodic
-write-with-response to keep BLE connections alive.
+Uses parallel writes, per-bulb health tracking, and session cycling
+to work around the H6006's ~15s firmware connection timeout.
 
 Usage:
     uv run python demo.py                  # 20s, 0.02s/frame
@@ -18,11 +18,8 @@ import random
 import sys
 import time
 
-from bleak import BleakClient
-
 from h6006ctl.ble import BulbSession, resolve_targets
 from h6006ctl.protocol import (
-    READ_UUID,
     WRITE_UUID,
     brightness_packet,
     color_temp_packet,
@@ -30,9 +27,8 @@ from h6006ctl.protocol import (
     rgb_packet,
 )
 
-# Every Nth frame, parallel-read from all bulbs to refresh
-# the BLE link layer supervision timer.
-KEEPALIVE_INTERVAL = 100
+# Reconnect before the H6006 firmware kills the connection (~15s limit).
+SESSION_SECONDS = 12.0
 
 
 def hsv_rgb(h, s=1.0, v=1.0):
@@ -40,24 +36,18 @@ def hsv_rgb(h, s=1.0, v=1.0):
     return int(r * 255), int(g * 255), int(b * 255)
 
 
-async def demo(duration: float, delay: float):
-    bulbs = await resolve_targets([], use_cache=False)
-    if not bulbs:
-        print("No bulbs found.", file=sys.stderr)
-        return 1
-
-    n = len(bulbs)
+async def run_session(bulbs, duration, delay, state):
+    """Run one BLE session worth of demo frames. Mutates state dict."""
+    f = state["frame"]
     phases = 8
-    print(f"{n} bulb(s) | {duration}s | {delay:.3f}s/frame | {phases} phases")
+    total_dur = state["total_duration"]
+    t_global = state["t_global"]
 
     async with BulbSession(bulbs) as session:
-        alive: dict[str, BleakClient] = dict(session._clients)
-        stats = {b.address: {"name": b.name, "sent": 0, "lost_at": None} for b in bulbs}
+        alive = dict(session._clients)
+        n = len(alive)
 
-        frame = [0]  # mutable counter for closure access
-
-        async def w(packets: dict[str, bytes]) -> None:
-            """Parallel write with per-bulb isolation."""
+        async def w(packets):
             to_send = {a: p for a, p in packets.items() if a in alive}
             if not to_send:
                 return
@@ -69,42 +59,30 @@ async def demo(duration: float, delay: float):
             for addr, result in zip(to_send, results):
                 if isinstance(result, BaseException):
                     del alive[addr]
-                    stats[addr]["lost_at"] = frame[0]
+                    state["lost"] += 1
                 else:
-                    stats[addr]["sent"] += 1
-
-        async def keepalive() -> None:
-            """Parallel read from all alive bulbs to refresh supervision timer."""
-            if frame[0] == 0 or frame[0] % KEEPALIVE_INTERVAL != 0 or not alive:
-                return
-            await asyncio.gather(
-                *(alive[a].read_gatt_char(READ_UUID) for a in list(alive)),
-                return_exceptions=True,
-            )
-
-        # Init: power on, max brightness
-        await w({b.address: power_packet(True) for b in bulbs})
-        await asyncio.sleep(0.3)
-        await w({b.address: brightness_packet(100) for b in bulbs})
-        await asyncio.sleep(0.15)
+                    state["sent"] += 1
 
         t0 = time.monotonic()
 
-        while (el := time.monotonic() - t0) < duration:
-            f = frame[0]
+        while True:
+            el_global = time.monotonic() - t_global
+            el_session = time.monotonic() - t0
+
+            if el_global >= total_dur:
+                break
+            if el_session >= duration:
+                break
             if not alive:
-                print("All bulbs lost.", file=sys.stderr)
                 break
 
-            phase = int((el / duration) * phases) % phases
+            phase = int((el_global / total_dur) * phases) % phases
 
             if phase == 0:
-                # Rainbow sweep
                 r, g, b = hsv_rgb(f * 0.04)
                 await w({a: rgb_packet(r, g, b) for a in alive})
 
             elif phase == 1:
-                # Per-bulb rainbow chase
                 addrs = list(alive)
                 await w({
                     a: rgb_packet(*hsv_rgb(f * 0.05 + i / max(len(addrs), 1)))
@@ -112,7 +90,6 @@ async def demo(duration: float, delay: float):
                 })
 
             elif phase == 2:
-                # Primary/secondary strobe
                 colors = [
                     (255, 0, 0), (0, 255, 0), (0, 0, 255),
                     (255, 255, 0), (0, 255, 255), (255, 0, 255),
@@ -122,20 +99,17 @@ async def demo(duration: float, delay: float):
                 await w({a: rgb_packet(*c) for a in alive})
 
             elif phase == 3:
-                # Brightness pulse + hue drift
                 bri = int(abs(((f * 3) % 200) - 100))
                 await w({a: brightness_packet(bri) for a in alive})
                 r, g, b = hsv_rgb(f * 0.02)
                 await w({a: rgb_packet(r, g, b) for a in alive})
 
             elif phase == 4:
-                # CT sweep warm <-> cool
                 pos = ((f * 2) % 120) / 120.0
                 k = int(2700 + 3800 * (1 - abs(2 * pos - 1)))
                 await w({a: color_temp_packet(k) for a in alive})
 
             elif phase == 5:
-                # Random per-bulb
                 await w({
                     a: rgb_packet(
                         random.randint(0, 255),
@@ -146,7 +120,6 @@ async def demo(duration: float, delay: float):
                 })
 
             elif phase == 6:
-                # Police: red/blue split
                 addrs = list(alive)
                 await w({
                     a: rgb_packet(
@@ -156,7 +129,6 @@ async def demo(duration: float, delay: float):
                 })
 
             elif phase == 7:
-                # Complementary pairs fast swap
                 pairs = [
                     ((255, 0, 0), (0, 255, 255)),
                     ((0, 255, 0), (255, 0, 255)),
@@ -166,24 +138,61 @@ async def demo(duration: float, delay: float):
                 c = pairs[f % len(pairs)][f % 2]
                 await w({a: rgb_packet(*c) for a in alive})
 
-            frame[0] += 1
-            await keepalive()
+            f += 1
             await asyncio.sleep(delay)
 
-        # Report
-        f = frame[0]
-        elapsed = time.monotonic() - t0
-        print(f"\n{f} frames in {elapsed:.1f}s ({f / max(elapsed, 0.01):.1f} fps)")
-        for addr, s in stats.items():
-            status = "alive" if addr in alive else f"lost at frame {s['lost_at']}"
-            print(f"  {s['name']}: {s['sent']} writes delivered, {status}")
+        state["frame"] = f
+        return len(alive) > 0
 
-        # Restore - only alive bulbs
-        if alive:
-            print("\nRestoring warm white...")
-            await w({a: brightness_packet(100) for a in alive})
+
+async def demo(duration: float, delay: float):
+    bulbs = await resolve_targets([], use_cache=False)
+    if not bulbs:
+        print("No bulbs found.", file=sys.stderr)
+        return 1
+
+    n = len(bulbs)
+    phases = 8
+    session_count = max(1, int(duration / SESSION_SECONDS) + 1)
+    print(f"{n} bulb(s) | {duration}s | {delay:.3f}s/frame | {phases} phases | reconnect every {SESSION_SECONDS:.0f}s")
+
+    state = {
+        "frame": 0,
+        "sent": 0,
+        "lost": 0,
+        "total_duration": duration,
+        "t_global": time.monotonic(),
+    }
+
+    cycle = 0
+    while time.monotonic() - state["t_global"] < duration:
+        cycle += 1
+        remaining = duration - (time.monotonic() - state["t_global"])
+        if remaining <= 0:
+            break
+        session_dur = min(SESSION_SECONDS, remaining)
+        ok = await run_session(bulbs, session_dur, delay, state)
+        if time.monotonic() - state["t_global"] < duration:
+            # Brief pause between session cycles for clean reconnect
             await asyncio.sleep(0.1)
-            await w({a: color_temp_packet(2700) for a in alive})
+
+    # Restore
+    elapsed = time.monotonic() - state["t_global"]
+    f = state["frame"]
+    print(f"\n{f} frames in {elapsed:.1f}s ({f / max(elapsed, 0.01):.1f} fps)")
+    print(f"  {state['sent']} writes delivered, {state['lost']} lost, {cycle} session(s)")
+
+    print("Restoring warm white...")
+    try:
+        async with BulbSession(bulbs) as session:
+            clients = session._clients
+            for addr, client in clients.items():
+                await client.write_gatt_char(WRITE_UUID, brightness_packet(100), response=False)
+            await asyncio.sleep(0.1)
+            for addr, client in clients.items():
+                await client.write_gatt_char(WRITE_UUID, color_temp_packet(2700), response=False)
+    except Exception:
+        print("  restore failed (reconnect failed)")
 
     return 0
 
