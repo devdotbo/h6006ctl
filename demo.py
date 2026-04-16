@@ -22,6 +22,7 @@ from bleak import BleakClient
 
 from h6006ctl.ble import BulbSession, resolve_targets
 from h6006ctl.protocol import (
+    READ_UUID,
     WRITE_UUID,
     brightness_packet,
     color_temp_packet,
@@ -29,9 +30,9 @@ from h6006ctl.protocol import (
     rgb_packet,
 )
 
-# Every Nth frame, use write-with-response to flush the BLE queue
-# and refresh the link layer supervision timer.
-KEEPALIVE_INTERVAL = 50
+# Every Nth frame, parallel-read from all bulbs to refresh
+# the BLE link layer supervision timer.
+KEEPALIVE_INTERVAL = 100
 
 
 def hsv_rgb(h, s=1.0, v=1.0):
@@ -60,9 +61,8 @@ async def demo(duration: float, delay: float):
             to_send = {a: p for a, p in packets.items() if a in alive}
             if not to_send:
                 return
-            use_response = (frame[0] % KEEPALIVE_INTERVAL == 0)
             results = await asyncio.gather(
-                *(alive[a].write_gatt_char(WRITE_UUID, p, response=use_response)
+                *(alive[a].write_gatt_char(WRITE_UUID, p, response=False)
                   for a, p in to_send.items()),
                 return_exceptions=True,
             )
@@ -72,6 +72,15 @@ async def demo(duration: float, delay: float):
                     stats[addr]["lost_at"] = frame[0]
                 else:
                     stats[addr]["sent"] += 1
+
+        async def keepalive() -> None:
+            """Parallel read from all alive bulbs to refresh supervision timer."""
+            if frame[0] == 0 or frame[0] % KEEPALIVE_INTERVAL != 0 or not alive:
+                return
+            await asyncio.gather(
+                *(alive[a].read_gatt_char(READ_UUID) for a in list(alive)),
+                return_exceptions=True,
+            )
 
         # Init: power on, max brightness
         await w({b.address: power_packet(True) for b in bulbs})
@@ -158,6 +167,7 @@ async def demo(duration: float, delay: float):
                 await w({a: rgb_packet(*c) for a in alive})
 
             frame[0] += 1
+            await keepalive()
             await asyncio.sleep(delay)
 
         # Report
