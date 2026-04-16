@@ -2,7 +2,8 @@
 """H6006 LED demo - every trick as fast as BLE allows.
 
 Cycles through 8 visual phases then restores bright warm white.
-Uses parallel writes and per-bulb health tracking for maximum throughput.
+Uses parallel writes, per-bulb health tracking, and periodic
+write-with-response to keep BLE connections alive.
 
 Usage:
     uv run python demo.py                  # 20s, 0.02s/frame
@@ -21,13 +22,16 @@ from bleak import BleakClient
 
 from h6006ctl.ble import BulbSession, resolve_targets
 from h6006ctl.protocol import (
-    READ_UUID,
     WRITE_UUID,
     brightness_packet,
     color_temp_packet,
     power_packet,
     rgb_packet,
 )
+
+# Every Nth frame, use write-with-response to flush the BLE queue
+# and refresh the link layer supervision timer.
+KEEPALIVE_INTERVAL = 50
 
 
 def hsv_rgb(h, s=1.0, v=1.0):
@@ -46,18 +50,17 @@ async def demo(duration: float, delay: float):
     print(f"{n} bulb(s) | {duration}s | {delay:.3f}s/frame | {phases} phases")
 
     async with BulbSession(bulbs) as session:
-        # Per-bulb tracking: {address: BleakClient} for alive bulbs only
         alive: dict[str, BleakClient] = dict(session._clients)
         stats = {b.address: {"name": b.name, "sent": 0, "lost_at": None} for b in bulbs}
-        last_keepalive = 0.0
 
         async def w(packets: dict[str, bytes]) -> None:
             """Parallel write with per-bulb isolation."""
             to_send = {a: p for a, p in packets.items() if a in alive}
             if not to_send:
                 return
+            use_response = (f % KEEPALIVE_INTERVAL == 0)
             results = await asyncio.gather(
-                *(alive[a].write_gatt_char(WRITE_UUID, p, response=False)
+                *(alive[a].write_gatt_char(WRITE_UUID, p, response=use_response)
                   for a, p in to_send.items()),
                 return_exceptions=True,
             )
@@ -68,19 +71,6 @@ async def demo(duration: float, delay: float):
                 else:
                     stats[addr]["sent"] += 1
 
-        async def keepalive() -> None:
-            """Read from each bulb to refresh BLE supervision timer."""
-            nonlocal last_keepalive
-            now = time.monotonic()
-            if now - last_keepalive < 3.0:
-                return
-            last_keepalive = now
-            for addr in list(alive):
-                try:
-                    await alive[addr].read_gatt_char(READ_UUID)
-                except Exception:
-                    pass  # read failure is OK, the round-trip still refreshes LL
-
         # Init: power on, max brightness
         await w({b.address: power_packet(True) for b in bulbs})
         await asyncio.sleep(0.3)
@@ -88,7 +78,6 @@ async def demo(duration: float, delay: float):
         await asyncio.sleep(0.15)
 
         t0 = time.monotonic()
-        last_keepalive = t0
         f = 0
 
         while (el := time.monotonic() - t0) < duration:
@@ -167,7 +156,6 @@ async def demo(duration: float, delay: float):
                 await w({a: rgb_packet(*c) for a in alive})
 
             f += 1
-            await keepalive()
             await asyncio.sleep(delay)
 
         # Report
