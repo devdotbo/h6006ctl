@@ -21,6 +21,7 @@ from bleak import BleakClient
 
 from h6006ctl.ble import BulbSession, resolve_targets
 from h6006ctl.protocol import (
+    READ_UUID,
     WRITE_UUID,
     brightness_packet,
     color_temp_packet,
@@ -48,6 +49,7 @@ async def demo(duration: float, delay: float):
         # Per-bulb tracking: {address: BleakClient} for alive bulbs only
         alive: dict[str, BleakClient] = dict(session._clients)
         stats = {b.address: {"name": b.name, "sent": 0, "lost_at": None} for b in bulbs}
+        last_keepalive = 0.0
 
         async def w(packets: dict[str, bytes]) -> None:
             """Parallel write with per-bulb isolation."""
@@ -66,6 +68,19 @@ async def demo(duration: float, delay: float):
                 else:
                     stats[addr]["sent"] += 1
 
+        async def keepalive() -> None:
+            """Read from each bulb to refresh BLE supervision timer."""
+            nonlocal last_keepalive
+            now = time.monotonic()
+            if now - last_keepalive < 3.0:
+                return
+            last_keepalive = now
+            for addr in list(alive):
+                try:
+                    await alive[addr].read_gatt_char(READ_UUID)
+                except Exception:
+                    pass  # read failure is OK, the round-trip still refreshes LL
+
         # Init: power on, max brightness
         await w({b.address: power_packet(True) for b in bulbs})
         await asyncio.sleep(0.3)
@@ -73,6 +88,7 @@ async def demo(duration: float, delay: float):
         await asyncio.sleep(0.15)
 
         t0 = time.monotonic()
+        last_keepalive = t0
         f = 0
 
         while (el := time.monotonic() - t0) < duration:
@@ -151,6 +167,7 @@ async def demo(duration: float, delay: float):
                 await w({a: rgb_packet(*c) for a in alive})
 
             f += 1
+            await keepalive()
             await asyncio.sleep(delay)
 
         # Report
