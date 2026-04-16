@@ -53,12 +53,14 @@ async def demo(duration: float, delay: float):
         alive: dict[str, BleakClient] = dict(session._clients)
         stats = {b.address: {"name": b.name, "sent": 0, "lost_at": None} for b in bulbs}
 
+        frame = [0]  # mutable counter for closure access
+
         async def w(packets: dict[str, bytes]) -> None:
             """Parallel write with per-bulb isolation."""
             to_send = {a: p for a, p in packets.items() if a in alive}
             if not to_send:
                 return
-            use_response = (f % KEEPALIVE_INTERVAL == 0)
+            use_response = (frame[0] % KEEPALIVE_INTERVAL == 0)
             results = await asyncio.gather(
                 *(alive[a].write_gatt_char(WRITE_UUID, p, response=use_response)
                   for a, p in to_send.items()),
@@ -67,7 +69,7 @@ async def demo(duration: float, delay: float):
             for addr, result in zip(to_send, results):
                 if isinstance(result, BaseException):
                     del alive[addr]
-                    stats[addr]["lost_at"] = f
+                    stats[addr]["lost_at"] = frame[0]
                 else:
                     stats[addr]["sent"] += 1
 
@@ -78,9 +80,9 @@ async def demo(duration: float, delay: float):
         await asyncio.sleep(0.15)
 
         t0 = time.monotonic()
-        f = 0
 
         while (el := time.monotonic() - t0) < duration:
+            f = frame[0]
             if not alive:
                 print("All bulbs lost.", file=sys.stderr)
                 break
@@ -155,10 +157,11 @@ async def demo(duration: float, delay: float):
                 c = pairs[f % len(pairs)][f % 2]
                 await w({a: rgb_packet(*c) for a in alive})
 
-            f += 1
+            frame[0] += 1
             await asyncio.sleep(delay)
 
         # Report
+        f = frame[0]
         elapsed = time.monotonic() - t0
         print(f"\n{f} frames in {elapsed:.1f}s ({f / max(elapsed, 0.01):.1f} fps)")
         for addr, s in stats.items():
